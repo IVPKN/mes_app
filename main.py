@@ -5,6 +5,8 @@ from PIL import Image, ImageTk
 import os
 import shutil
 import time
+import webbrowser
+import pyperclip 
 
 def create_connection():
     conn = sqlite3.connect('app_database.db')
@@ -37,6 +39,17 @@ def create_tables():
 
     conn.commit()
     conn.close()
+
+global_receiver_id = None
+
+def start_video_call(receiver_id):
+    room_name = f"ChatApp_Room_{current_user_id}_{receiver_id}"  
+    jitsi_url = f"https://meet.jit.si/{room_name}"  
+    webbrowser.open(jitsi_url)  
+    messagebox.showinfo(
+        "Видеозвонок",
+        f"Видеозвонок начнется в браузере в комнате: {room_name}"
+    )
 
 def create_user(username):
     conn = create_connection()
@@ -105,6 +118,7 @@ def send_message():
         if receiver:
             receiver_id = receiver[0]
             content = message_entry.get()
+            message_entry.bind("<Return>", lambda event: send_message())
             if receiver_id and (content or selected_file_path or selected_image_path):
                 file_destination = None
                 image_destination = None
@@ -126,10 +140,10 @@ def send_message():
                 create_message(current_user_id, receiver_id, content, file_destination, image_destination)
                 message_entry.delete(0, tk.END)
                 clear_attachments()
-                attachments_label.config(text="Прикрепления: Нет")
+                attachments_label.config(text="Нет прикреплений")
                 refresh_messages()
             else:
-                messagebox.showerror("Ошибка", "Нельзя отправить пустое сообщение без файла или изображения.")
+                pass
         else:
             messagebox.showerror("Ошибка", "Пользователь не найден.")
 
@@ -212,12 +226,17 @@ def update_ui_after_logout():
     register_button.pack(pady=5)
 
 def open_chat_window(receiver_id):
+    global global_receiver_id
+    global_receiver_id = receiver_id
     chat_window = tk.Toplevel(root)
     chat_window.title(f"Чат с пользователем {receiver_id}")
     chat_window.geometry("500x600")
 
     chat_messages_frame = tk.Frame(chat_window)
     chat_messages_frame.pack(pady=10, fill=tk.BOTH, expand=True)
+    
+    video_call_button = tk.Button(chat_window, text="Начать видеозвонок", command=lambda: start_video_call(receiver_id))
+    video_call_button.pack(pady=5)
 
     chat_canvas = tk.Canvas(chat_messages_frame)
     chat_scrollbar = tk.Scrollbar(chat_messages_frame, orient="vertical", command=chat_canvas.yview)
@@ -231,46 +250,48 @@ def open_chat_window(receiver_id):
     )
     chat_canvas.create_window((0, 0), window=chat_scrollable_frame, anchor='nw')
     chat_canvas.configure(yscrollcommand=chat_scrollbar.set)
-
+    
     chat_canvas.pack(side="left", fill="both", expand=True)
     chat_scrollbar.pack(side="right", fill="y")
 
     chat_message_entry = tk.Entry(chat_window, width=50)
     chat_message_entry.pack(pady=10)
+    chat_message_entry.bind("<Return>", lambda event: send_chat_message())
 
-    chat_attachments_label = tk.Label(chat_window, text="Прикрепления: Нет")
+    chat_attachments_label = tk.Label(chat_window, text="Нет прикреплений")
     chat_attachments_label.pack(pady=5)
+    
+    chat_attach_file_button = tk.Button(chat_window, text="Прикрепить файл", command=lambda: attach_chat_file(chat_attachments_label))
+    chat_attach_file_button.pack(pady=2)
 
-    chat_attach_file_button = tk.Button(chat_window, text="Прикрепить файл", command=lambda: attach_file(chat_attachments_label))
-    chat_attach_file_button.pack(pady=5)
 
     def send_chat_message():
         content = chat_message_entry.get()
-        if content or selected_file_path or selected_image_path:
+        if content or selected_chat_file_path or selected_chat_image_path:
             file_destination = None
             image_destination = None
 
-            if selected_file_path:
+            if selected_chat_file_path:
                 if not os.path.exists('files'):
                     os.makedirs('files')
-                unique_filename = f"{current_user_id}_{int(time.time())}_{os.path.basename(selected_file_path)}"
+                unique_filename = f"{current_user_id}_{int(time.time())}_{os.path.basename(selected_chat_file_path)}"
                 file_destination = os.path.join('files', unique_filename)
-                shutil.copy(selected_file_path, file_destination)
+                shutil.copy(selected_chat_file_path, file_destination)
 
-            if selected_image_path:
+            if selected_chat_image_path:
                 if not os.path.exists('images'):
                     os.makedirs('images')
-                unique_imagename = f"{current_user_id}_{int(time.time())}_{os.path.basename(selected_image_path)}"
+                unique_imagename = f"{current_user_id}_{int(time.time())}_{os.path.basename(selected_chat_image_path)}"
                 image_destination = os.path.join('images', unique_imagename)
-                shutil.copy(selected_image_path, image_destination)
+                shutil.copy(selected_chat_image_path, image_destination)
 
             create_message(current_user_id, receiver_id, content, file_destination, image_destination)
             chat_message_entry.delete(0, tk.END)
-            clear_attachments()
-            chat_attachments_label.config(text="Прикрепления: Нет")
+            clear_chat_attachments()
+            chat_attachments_label.config(text="Нет прикреплений")
             refresh_chat_messages(chat_scrollable_frame, receiver_id)
         else:
-            messagebox.showerror("Ошибка", "Нельзя отправить пустое сообщение без файла или изображения.")
+            pass
 
     chat_send_button = tk.Button(chat_window, text="Отправить", command=send_chat_message)
     chat_send_button.pack(pady=5)
@@ -298,14 +319,10 @@ def refresh_chat_messages(container, receiver_id):
         if message[1]:
             content_label = tk.Label(message_frame, text=message[1], bg='lightgrey', wraplength=300)
             content_label.pack(anchor='w')
+            
+            copy_button = tk.Button(message_frame, text="Копировать", command=lambda msg=message[1]: copy_to_clipboard(msg))
+            copy_button.pack(anchor='w', pady=2)
 
-        if message[4]:
-            img = Image.open(message[4])
-            img.thumbnail((200, 200))
-            photo = ImageTk.PhotoImage(img)
-            img_label = tk.Label(message_frame, image=photo)
-            img_label.image = photo
-            img_label.pack(anchor='w')
 
         if message[3]:
             file_name = os.path.basename(message[3])
@@ -351,7 +368,6 @@ def open_profile_section():
 def open_settings_section():
     clear_content_frame()
     tk.Label(content_frame, text="Настройки приложения", font=("Arial", 16)).pack(pady=20)
-    # Добавьте здесь элементы настроек по необходимости
 
 def show_news_section():
     clear_content_frame()
@@ -366,7 +382,7 @@ def show_news_section():
     scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
     for item in news:
         news_text.insert(tk.END, item + "\n\n")
-    news_text.config(state=tk.DISABLED)  # Сделать текст не редактируемым
+    news_text.config(state=tk.DISABLED)  
     news_text.pack(expand=True, fill=tk.BOTH)
 
 def show_study_section():
@@ -384,23 +400,56 @@ def show_useful_info_section():
 
     tk.Label(content_frame, text=useful_info, font=("Arial", 12)).pack(pady=10)
 
+def delete_chat(peer_id):
+
+    if messagebox.askyesno("Подтверждение", f"Вы действительно хотите удалить чат с пользователем {peer_id}?"):
+        conn = create_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            DELETE FROM messages 
+            WHERE (sender_id = ? AND receiver_id = ?) 
+               OR (sender_id = ? AND receiver_id = ?);
+        ''', (current_user_id, peer_id, peer_id, current_user_id))
+        conn.commit()
+        conn.close()
+        messagebox.showinfo("Успех", "Чат был успешно удален.")
+        show_chat_section() 
+
 def show_chat_section():
     clear_content_frame()
     tk.Label(content_frame, text="Раздел 'Чат'", font=("Arial", 16)).pack(pady=10)
-    # Отображение списка предыдущих чатов
     previous_chats = get_previous_chats(current_user_id)
+    
     if previous_chats:
         tk.Label(content_frame, text="Предыдущие чаты:", font=("Arial", 14)).pack(pady=5)
+        
+        chats_container = tk.Frame(content_frame)
+        chats_container.pack(pady=5, fill=tk.BOTH, expand=True)
+        
+        chats_container.columnconfigure(0, weight=1)  
+        chats_container.columnconfigure(1, weight=0)  
+        chats_container.columnconfigure(2, weight=1)  
+        
         for chat_partner_id in previous_chats:
             user = get_user_by_id(chat_partner_id)
             partner_name = user[1] if user else f"Пользователь {chat_partner_id}"
-            def open_chat_with_partner(partner_id=chat_partner_id):
-                open_chat_window(partner_id)
-            partner_button = tk.Button(content_frame, text=f"Чат с {partner_name}", command=open_chat_with_partner)
-            partner_button.pack(pady=2)
+    
+            chat_frame = tk.Frame(chats_container)
+            chat_frame.grid(row=previous_chats.index(chat_partner_id), column=1, pady=5, sticky="ew")
+            
+            chat_frame.columnconfigure(0, weight=1)  
+            chat_frame.columnconfigure(1, weight=0)  
+            chat_frame.columnconfigure(2, weight=0)  
+            chat_frame.columnconfigure(3, weight=1)  
+    
+            partner_button = tk.Button(chat_frame, text=f"{partner_name}", command=lambda partner_id=chat_partner_id: open_chat_window(partner_id))
+            partner_button.grid(row=0, column=1, padx=(0, 10), sticky="e")
+    
+            delete_button = tk.Button(chat_frame, text="Удалить", command=lambda partner_id=chat_partner_id: delete_chat(partner_id))
+            delete_button.grid(row=0, column=2, sticky="w")
     else:
         tk.Label(content_frame, text="У вас нет предыдущих чатов.", font=("Arial", 12)).pack(pady=5)
-
+    
     start_chat_button = tk.Button(content_frame, text="Начать новый чат", command=start_chat)
     start_chat_button.pack(pady=5)
 
@@ -416,16 +465,26 @@ def attach_file(label):
         label.config(text=f"Прикреплен файл: {os.path.basename(file_path)}")
     else:
         selected_file_path = None
+        label.config(text="Нет прикреплений")
+
+def attach_chat_file(label):
+    global selected_chat_file_path
+    file_path = filedialog.askopenfilename()
+    if file_path:
+        selected_chat_file_path = file_path
+        label.config(text=f"Прикреплен файл: {os.path.basename(file_path)}")
+    else:
+        selected_chat_file_path = None
         label.config(text="Прикрепления: Нет")
 
-def attach_image(label):
-    global selected_image_path
+def attach_chat_image(label):
+    global selected_chat_image_path
     image_path = filedialog.askopenfilename(filetypes=[("Image Files", "*.png;*.jpg;*.jpeg;*.gif")])
     if image_path:
-        selected_image_path = image_path
+        selected_chat_image_path = image_path
         label.config(text=f"Прикреплено изображение: {os.path.basename(image_path)}")
     else:
-        selected_image_path = None
+        selected_chat_image_path = None
         label.config(text="Прикрепления: Нет")
 
 def clear_attachments():
@@ -433,6 +492,16 @@ def clear_attachments():
     global selected_image_path
     selected_file_path = None
     selected_image_path = None
+
+def clear_chat_attachments():
+    global selected_chat_file_path
+    global selected_chat_image_path
+    selected_chat_file_path = None
+    selected_chat_image_path = None
+
+def copy_to_clipboard(text):
+    pyperclip.copy(text)
+    
 
 def display_message(listbox, message):
     display_text = f"{message[2]}: "
@@ -444,11 +513,14 @@ def display_message(listbox, message):
     listbox.insert(tk.END, display_text + "\n")
 
     if message[4]:
-        img = Image.open(message[4])
-        img.thumbnail((100, 100))
-        photo = ImageTk.PhotoImage(img)
-        listbox.image_create(tk.END, image=photo)
-        listbox.insert(tk.END, "\n")
+        try:
+            img = Image.open(message[4])
+            img.thumbnail((100, 100))
+            photo = ImageTk.PhotoImage(img)
+            listbox.image_create(tk.END, image=photo)
+            listbox.insert(tk.END, "\n")
+        except Exception as e:
+            listbox.insert(tk.END, f"Не удалось отобразить изображение: {e}\n")
 
     if message[3]:
         file_name = os.path.basename(message[3])
@@ -483,7 +555,7 @@ def get_previous_chats(user_id):
         FROM messages
         WHERE receiver_id = ?
         GROUP BY sender_id
-        ORDER BY last_msg_time ASC
+        ORDER BY last_msg_time DESC
     ''', (user_id, user_id))
     result = cursor.fetchall()
     conn.close()
@@ -498,8 +570,8 @@ def get_user_by_id(user_id):
     return user
 
 root = tk.Tk()
-root.title("Чат Приложение")
-root.geometry("600x700")
+root.title("Приложение")
+root.geometry("800x900")
 
 content_frame = tk.Frame(root)
 
@@ -518,11 +590,12 @@ study_button = tk.Button(nav_frame, text="Учеба", command=show_study_sectio
 schedule_button = tk.Button(nav_frame, text="Расписание", command=show_schedule_section)
 useful_info_button = tk.Button(nav_frame, text="Полезно узнать", command=show_useful_info_section)
 chat_button = tk.Button(nav_frame, text="Чат", command=show_chat_section)
-
+video_call_menu = tk.Button(nav_frame, text="Видеозвонок", command=lambda: start_video_call(global_receiver_id))
 study_button.pack(side=tk.LEFT, padx=5, pady=5)
 schedule_button.pack(side=tk.LEFT, padx=5, pady=5)
 useful_info_button.pack(side=tk.LEFT, padx=5, pady=5)
 chat_button.pack(side=tk.LEFT, padx=5, pady=5)
+video_call_menu.pack(side=tk.LEFT, padx=5, pady=5)
 
 right_frame = tk.Frame(top_frame)
 right_frame.pack(side=tk.RIGHT)
@@ -537,9 +610,8 @@ username_label = tk.Label(root, text="", font=("Arial", 14))
 
 message_entry = tk.Entry(content_frame, width=50)
 
-attachments_label = tk.Label(content_frame, text="Прикрепления: Нет")
+attachments_label = tk.Label(content_frame, text="Нет прикреплений")
 attach_file_button = tk.Button(content_frame, text="Прикрепить файл", command=lambda: attach_file(attachments_label))
-
 send_button = tk.Button(content_frame, text="Отправить сообщение", command=send_message)
 
 messages_list = tk.Listbox(content_frame, width=70, height=15)
@@ -549,6 +621,9 @@ current_username = None
 
 selected_file_path = None
 selected_image_path = None
+
+selected_chat_file_path = None
+selected_chat_image_path = None
 
 login_button = tk.Button(root, text="Вход", command=login)
 register_button = tk.Button(root, text="Регистрация", command=register)
