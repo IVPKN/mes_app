@@ -1,18 +1,18 @@
 import sqlite3
 import tkinter as tk
 from tkinter import messagebox, simpledialog, filedialog
-from PIL import Image, ImageTk
 import os
 import shutil
 import time
 import webbrowser
 import pyperclip
-import hashlib
+
+import useful_info
+import news
 
 def create_connection():
     conn = sqlite3.connect('app_database.db')
     return conn
-
 
 def create_tables():
     conn = create_connection()
@@ -35,6 +35,7 @@ def create_tables():
             file_path TEXT,
             image_path TEXT,
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+            receiver_type TEXT DEFAULT 'user',
             FOREIGN KEY (sender_id) REFERENCES users(id),
             FOREIGN KEY (receiver_id) REFERENCES users(id)
         );
@@ -60,16 +61,11 @@ def create_tables():
     conn.commit()
     conn.close()
 
-
-def hash_password(password):
-    return hashlib.sha256(password.encode()).hexdigest()
-
 def create_user(username, password):
     conn = create_connection()
     cursor = conn.cursor()
     try:
-        hashed_password = hash_password(password)
-        cursor.execute('INSERT INTO users (username, password) VALUES (?, ?);', (username, hashed_password))
+        cursor.execute('INSERT INTO users (username, password) VALUES (?, ?);', (username, password))
         conn.commit()
         messagebox.showinfo("Успех", "Пользователь успешно зарегистрирован.")
         user_id = cursor.lastrowid
@@ -83,23 +79,96 @@ def create_user(username, password):
 def authenticate_user(username, password):
     conn = create_connection()
     cursor = conn.cursor()
-    hashed_password = hash_password(password)
-    cursor.execute('SELECT id FROM users WHERE username = ? AND password = ?;', (username, hashed_password))
+    cursor.execute('SELECT id FROM users WHERE username = ? AND password = ?;', (username, password))
     user = cursor.fetchone()
     conn.close()
     return user[0] if user else None
+
+def login():
+    username = simpledialog.askstring("Вход", "Введите имя пользователя:")
+    if username:
+        password = simpledialog.askstring("Вход", "Введите пароль:", show="*")
+        if password:
+            user_id = authenticate_user(username, password)
+            if user_id:
+                set_current_user(user_id, username)
+                update_ui_after_login()
+            else:
+                messagebox.showerror("Ошибка", "Неверное имя пользователя или пароль.")
+
+def register():
+    register_window = tk.Toplevel(root)
+    register_window.title("Регистрация пользователя")
+    register_window.geometry("300x200")
+
+    tk.Label(register_window, text="Имя пользователя:").pack(pady=5)
+    username_entry = tk.Entry(register_window, width=30)
+    username_entry.pack(pady=5)
+
+    tk.Label(register_window, text="Пароль:").pack(pady=5)
+    password_entry = tk.Entry(register_window, width=30, show="*")
+    password_entry.pack(pady=5)
+
+    def submit_registration():
+        username = username_entry.get().strip()
+        password = password_entry.get().strip()
+
+        if len(username) == 0 or len(password) == 0:
+            messagebox.showwarning("Ошибка", "Логин или пароль нельзя оставить пустыми.")
+            return  
+
+        try:
+            print(f"Регистрируем: {username}, {password}")
+            create_user(username, password)
+            register_window.destroy()
+        except sqlite3.IntegrityError:
+            messagebox.showerror("Ошибка", "Имя пользователя уже используется.")
+        except Exception as e:
+            print(f"Ошибка при создании пользователя: {e}")
+            messagebox.showinfo("Неожиданная ошибка", str(e))
+
+    submit_button = tk.Button(register_window, text="Зарегистрироваться", command=submit_registration)
+    submit_button.pack(pady=10)
+
+def set_current_user(user_id, username):
+    global current_user_id
+    global current_username
+    current_user_id = user_id
+    current_username = username
+    with open('current_user.txt', 'w') as f:
+        f.write(f"{user_id},{username}")
+    username_label.config(text=f"Пользователь: {current_username} (ID: {current_user_id})")
+
+def get_current_user():
+    if os.path.exists('current_user.txt'):
+        with open('current_user.txt', 'r') as f:
+            try:
+                user_id, username = f.read().split(',')
+                return int(user_id), username
+            except ValueError:
+                return None, None
+    return None, None
+
+def logout():
+    global current_user_id
+    global current_username
+    current_user_id = None
+    current_username = None
+    if os.path.exists('current_user.txt'):
+        os.remove('current_user.txt')
+    update_ui_after_logout()
 
 def update_user_details(user_id, new_username=None, new_password=None):
     conn = create_connection()
     cursor = conn.cursor()
 
     if new_username and new_password:
-        hashed_password = hash_password(new_password)
+        hashed_password = new_password
         cursor.execute('UPDATE users SET username = ?, password = ? WHERE id = ?;', (new_username, hashed_password, user_id))
     elif new_username:
         cursor.execute('UPDATE users SET username = ? WHERE id = ?;', (new_username, user_id))
     elif new_password:
-        hashed_password = hash_password(new_password)
+        hashed_password = new_password
         cursor.execute('UPDATE users SET password = ? WHERE id = ?;', (hashed_password, user_id))
 
     conn.commit()
@@ -162,9 +231,9 @@ def load_group_messages(group_id):
     cursor.execute('''
         SELECT sender_id, content, timestamp, file_path, image_path 
         FROM messages 
-        WHERE receiver_id = ?
+        WHERE receiver_id = ? AND receiver_type = 'group'
         ORDER BY timestamp;
-    ''', (group_id,))  
+    ''', (group_id,))
     messages = cursor.fetchall()
     conn.close()
     return messages
@@ -174,9 +243,9 @@ def send_group_message(sender_id, group_id, content, file_path=None, image_path=
     cursor = conn.cursor()
     try:
         cursor.execute('''
-            INSERT INTO messages (sender_id, receiver_id, content, file_path, image_path)
-            VALUES (?, ?, ?, ?, ?);
-        ''', (sender_id, group_id, content, file_path, image_path))
+        INSERT INTO messages (sender_id, receiver_id, content, file_path, image_path, receiver_type)
+        VALUES (?, ?, ?, ?, ?, ?);
+            ''', (sender_id, group_id, content, file_path, image_path, 'group'))
         conn.commit()
     except Exception as e:
         messagebox.showerror("Ошибка", f"Ошибка отправки сообщения: {e}")
@@ -315,7 +384,7 @@ def open_group_chat_window(group_id):
 
     def submit_group_message():
         content = message_entry.get()
-        if not (content.strip() or selected_file_path or selected_image_path):  
+        if not (content.strip() or selected_file_path):  
             return  
 
         file_destination = None
@@ -327,13 +396,6 @@ def open_group_chat_window(group_id):
             unique_filename = f"{current_user_id}_{int(time.time())}_{os.path.basename(selected_file_path)}"
             file_destination = os.path.join('files', unique_filename)
             shutil.copy(selected_file_path, file_destination)
-
-        if selected_image_path:
-            if not os.path.exists('images'):
-                os.makedirs('images')  
-            unique_imagename = f"{current_user_id}_{int(time.time())}_{os.path.basename(selected_image_path)}"
-            image_destination = os.path.join('images', unique_imagename)
-            shutil.copy(selected_image_path, image_destination)
 
         send_group_message(current_user_id, group_id, content, file_path=file_destination, image_path=image_destination)
 
@@ -379,20 +441,6 @@ def delete_group_chat(group_id):
         finally:
             conn.close()
 
-def leave_group_chat(group_id):
-    if messagebox.askyesno("Подтверждение", f"Вы действительно хотите покинуть группу ID {group_id}?"):
-        conn = create_connection()
-        cursor = conn.cursor()
-        
-        cursor.execute('DELETE FROM group_members WHERE group_id = ? AND user_id = ?;', (group_id, current_user_id))
-        
-        cursor.execute('DELETE FROM messages WHERE group_id = ? AND sender_id = ?;', (group_id, current_user_id))
-        
-        conn.commit()
-        conn.close()
-        messagebox.showinfo("Успех", f"Вы успешно покинули группу ID {group_id}.")
-        show_group_chats()
-
 def find_user(identifier):
     conn = create_connection()
     cursor = conn.cursor()
@@ -407,12 +455,16 @@ def find_user(identifier):
 def create_message(sender_id, receiver_id, content, file_path=None, image_path=None):
     conn = create_connection()
     cursor = conn.cursor()
-    cursor.execute('''
-        INSERT INTO messages (sender_id, receiver_id, content, file_path, image_path)
-        VALUES (?, ?, ?, ?, ?);
-    ''', (sender_id, receiver_id, content, file_path, image_path))
-    conn.commit()
-    conn.close()
+    try:
+        cursor.execute('''
+            INSERT INTO messages (sender_id, receiver_id, content, file_path, image_path)
+            VALUES (?, ?, ?, ?, ?);
+        ''', (sender_id, receiver_id, content, file_path, image_path))
+        conn.commit()
+    except Exception as e:
+        messagebox.showerror("Ошибка", f"Ошибка отправки сообщения: {e}")
+    finally:
+        conn.close()
 
 def load_messages(user_id, chat_with_id=None):
     conn = create_connection()
@@ -421,11 +473,19 @@ def load_messages(user_id, chat_with_id=None):
         cursor.execute('''
             SELECT sender_id, content, timestamp, file_path, image_path 
             FROM messages 
-            WHERE (sender_id = ? AND receiver_id = ?) OR (sender_id = ? AND receiver_id = ?)
+            WHERE ((sender_id = ? AND receiver_id = ?) OR (sender_id = ? AND receiver_id = ?))
+            AND receiver_type = 'user'
+            AND sender_id != receiver_id  -- Исключить сообщения самому себе
             ORDER BY timestamp;
         ''', (user_id, chat_with_id, chat_with_id, user_id))
     else:
-        cursor.execute('SELECT sender_id, content, timestamp, file_path, image_path FROM messages WHERE receiver_id = ? ORDER BY timestamp;', (user_id,))
+        cursor.execute('''
+            SELECT sender_id, content, timestamp, file_path, image_path 
+            FROM messages 
+            WHERE receiver_id = ? AND receiver_type = 'user'
+            AND sender_id != receiver_id  -- Исключить сообщения самому себе
+            ORDER BY timestamp;
+        ''', (user_id,))
     messages = cursor.fetchall()
     conn.close()
     return messages
@@ -438,7 +498,7 @@ def send_message():
             receiver_id = receiver[0]
             content = message_entry.get()
             message_entry.bind("<Return>", lambda event: send_message())
-            if receiver_id and (content or selected_file_path or selected_image_path):
+            if receiver_id and (content or selected_file_path):
                 file_destination = None
                 image_destination = None
 
@@ -448,13 +508,6 @@ def send_message():
                     unique_filename = f"{current_user_id}_{int(time.time())}_{os.path.basename(selected_file_path)}"
                     file_destination = os.path.join('files', unique_filename)
                     shutil.copy(selected_file_path, file_destination)
-
-                if selected_image_path:
-                    if not os.path.exists('images'):
-                        os.makedirs('images')
-                    unique_imagename = f"{current_user_id}_{int(time.time())}_{os.path.basename(selected_image_path)}"
-                    image_destination = os.path.join('images', unique_imagename)
-                    shutil.copy(selected_image_path, image_destination)
 
                 create_message(current_user_id, receiver_id, content, file_destination, image_destination)
                 message_entry.delete(0, tk.END)
@@ -472,86 +525,12 @@ def refresh_messages():
     for message in messages:
         display_message(messages_list, message)
 
-def login():
-    username = simpledialog.askstring("Вход", "Введите имя пользователя:")
-    if username:
-        password = simpledialog.askstring("Вход", "Введите пароль:", show="*")
-        if password:
-            user_id = authenticate_user(username, password)
-            if user_id:
-                set_current_user(user_id, username)
-                update_ui_after_login()
-            else:
-                messagebox.showerror("Ошибка", "Неверное имя пользователя или пароль.")
-
-def register():
-    register_window = tk.Toplevel(root)
-    register_window.title("Регистрация пользователя")
-    register_window.geometry("300x200")
-
-    tk.Label(register_window, text="Имя пользователя:").pack(pady=5)
-    username_entry = tk.Entry(register_window, width=30)
-    username_entry.pack(pady=5)
-
-    tk.Label(register_window, text="Пароль:").pack(pady=5)
-    password_entry = tk.Entry(register_window, width=30, show="*")
-    password_entry.pack(pady=5)
-
-    def submit_registration():
-        username = username_entry.get().strip()
-        password = password_entry.get().strip()
-
-        if len(username) == 0 or len(password) == 0:
-            messagebox.showwarning("Ошибка", "Логин или пароль нельзя оставить пустыми.")
-            return  
-
-        try:
-            print(f"Регистрируем: {username}, {password}")
-            create_user(username, password)
-            register_window.destroy()
-        except sqlite3.IntegrityError:
-            messagebox.showerror("Ошибка", "Имя пользователя уже используется.")
-        except Exception as e:
-            print(f"Ошибка при создании пользователя: {e}")
-            messagebox.showinfo("Неожиданная ошибка", str(e))
-
-    submit_button = tk.Button(register_window, text="Зарегистрироваться", command=submit_registration)
-    submit_button.pack(pady=10)
-
-def set_current_user(user_id, username):
-    global current_user_id
-    global current_username
-    current_user_id = user_id
-    current_username = username
-    with open('current_user.txt', 'w') as f:
-        f.write(f"{user_id},{username}")
-    username_label.config(text=f"Пользователь: {current_username} (ID: {current_user_id})")
-
-def get_current_user():
-    if os.path.exists('current_user.txt'):
-        with open('current_user.txt', 'r') as f:
-            try:
-                user_id, username = f.read().split(',')
-                return int(user_id), username
-            except ValueError:
-                return None, None
-    return None, None
-
-def logout():
-    global current_user_id
-    global current_username
-    current_user_id = None
-    current_username = None
-    if os.path.exists('current_user.txt'):
-        os.remove('current_user.txt')
-    update_ui_after_logout()
-
 def update_ui_after_login():
     login_button.pack_forget()
     register_button.pack_forget()
     top_frame.pack(side=tk.TOP, fill=tk.X)
     content_frame.pack(fill=tk.BOTH, expand=True)
-    show_news_section()
+    news.show_news_section(content_frame)
 
 def update_ui_after_logout():
     top_frame.pack_forget()
@@ -599,7 +578,7 @@ def open_chat_window(receiver_id):
 
     def send_chat_message():
         content = chat_message_entry.get()
-        if content or selected_chat_file_path or selected_chat_image_path:
+        if content or selected_chat_file_path:
             file_destination = None
             image_destination = None
 
@@ -609,13 +588,6 @@ def open_chat_window(receiver_id):
                 unique_filename = f"{current_user_id}_{int(time.time())}_{os.path.basename(selected_chat_file_path)}"
                 file_destination = os.path.join('files', unique_filename)
                 shutil.copy(selected_chat_file_path, file_destination)
-
-            if selected_chat_image_path:
-                if not os.path.exists('images'):
-                    os.makedirs('images')
-                unique_imagename = f"{current_user_id}_{int(time.time())}_{os.path.basename(selected_chat_image_path)}"
-                image_destination = os.path.join('images', unique_imagename)
-                shutil.copy(selected_chat_image_path, image_destination)
 
             create_message(current_user_id, receiver_id, content, file_destination, image_destination)
             chat_message_entry.delete(0, tk.END)
@@ -723,36 +695,10 @@ def open_settings_section():
     save_button = tk.Button(content_frame, text="Сохранить изменения", command=save_changes)
     save_button.pack(pady=10)
 
-def show_news_section():
-    clear_content_frame()
-    tk.Label(content_frame, text="Новости", font=("Arial", 16)).pack(pady=20)
-    news = [
-        "Добро пожаловать в приложение!",
-        "Следите за обновлениями."
-    ]
-    scrollbar = tk.Scrollbar(content_frame)
-    news_text = tk.Text(content_frame, wrap=tk.WORD, yscrollcommand=scrollbar.set, font=("Arial", 14))
-    scrollbar.config(command=news_text.yview)
-    scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-    for item in news:
-        news_text.insert(tk.END, item + "\n\n")
-    news_text.config(state=tk.DISABLED)  
-    news_text.pack(expand=True, fill=tk.BOTH)
 
-def show_study_section():
-    clear_content_frame()
-    tk.Label(content_frame, text="Раздел 'Учеба'", font=("Arial", 16)).pack(pady=20)
 
-def show_schedule_section():
-    clear_content_frame()
-    tk.Label(content_frame, text="Раздел 'Расписание'", font=("Arial", 16)).pack(pady=20)
 
-def show_useful_info_section():
-    clear_content_frame()
-    tk.Label(content_frame, text="Полезная информация", font=("Arial", 16)).pack(pady=20)
-    useful_info = "Здесь вы можете найти полезную информацию."
 
-    tk.Label(content_frame, text=useful_info, font=("Arial", 12)).pack(pady=10)
 
 def delete_chat(peer_id):
 
@@ -841,27 +787,13 @@ def attach_chat_file(label):
         selected_chat_file_path = None
         label.config(text="Прикрепления: Нет")
 
-def attach_chat_image(label):
-    global selected_chat_image_path
-    image_path = filedialog.askopenfilename(filetypes=[("Image Files", "*.png;*.jpg;*.jpeg;*.gif")])
-    if image_path:
-        selected_chat_image_path = image_path
-        label.config(text=f"Прикреплено изображение: {os.path.basename(image_path)}")
-    else:
-        selected_chat_image_path = None
-        label.config(text="Прикрепления: Нет")
-
 def clear_attachments():
     global selected_file_path
-    global selected_image_path
     selected_file_path = None
-    selected_image_path = None
 
 def clear_chat_attachments():
     global selected_chat_file_path
-    global selected_chat_image_path
     selected_chat_file_path = None
-    selected_chat_image_path = None
 
 def copy_to_clipboard(text):
     pyperclip.copy(text)
@@ -876,48 +808,20 @@ def display_message(listbox, message):
 
     listbox.insert(tk.END, display_text + "\n")
 
-    if message[4]:
-        try:
-            img = Image.open(message[4])
-            img.thumbnail((100, 100))
-            photo = ImageTk.PhotoImage(img)
-            listbox.image_create(tk.END, image=photo)
-            listbox.insert(tk.END, "\n")
-        except Exception as e:
-            listbox.insert(tk.END, f"Не удалось отобразить изображение: {e}\n")
-
-    if message[3]:
-        file_name = os.path.basename(message[3])
-
-        def download_file(path=message[3]):
-            if os.path.exists(path):
-                save_path = filedialog.asksaveasfilename(initialfile=file_name)
-                if save_path:
-                    shutil.copy(path, save_path)
-                    messagebox.showinfo("Успех", f"Файл сохранен: {save_path}")
-            else:
-                messagebox.showerror("Ошибка", "Файл не найден.")
-
-        listbox.insert(tk.END, f"Скачать файл: {file_name}\n")
-
-def open_file(path):
-    if os.path.exists(path):
-        os.startfile(path)
-    else:
-        messagebox.showerror("Ошибка", "Файл не найден.")
-
 def get_previous_chats(user_id):
     conn = create_connection()
     cursor = conn.cursor()
     cursor.execute('''
         SELECT receiver_id, MAX(timestamp) as last_msg_time
         FROM messages
-        WHERE sender_id = ?
+        WHERE sender_id = ? AND receiver_type = 'user'
+        AND sender_id != receiver_id  -- Исключить сообщения самому себе
         GROUP BY receiver_id
         UNION
         SELECT sender_id, MAX(timestamp) as last_msg_time
         FROM messages
-        WHERE receiver_id = ?
+        WHERE receiver_id = ? AND receiver_type = 'user'
+        AND sender_id != receiver_id  -- Исключить сообщения самому себе
         GROUP BY sender_id
         ORDER BY last_msg_time DESC
     ''', (user_id, user_id))
@@ -950,15 +854,12 @@ settings_button.pack(padx=10, pady=5)
 nav_frame = tk.Frame(top_frame)
 nav_frame.pack(side=tk.LEFT, expand=True)
 
-study_button = tk.Button(nav_frame, text="Учеба", command=show_study_section)
-schedule_button = tk.Button(nav_frame, text="Расписание", command=show_schedule_section)
-useful_info_button = tk.Button(nav_frame, text="Полезно узнать", command=show_useful_info_section)
+useful_info_button = tk.Button(nav_frame, text="Полезно узнать", command=lambda: useful_info.show_useful_info_section(content_frame))
 chat_button = tk.Button(nav_frame, text="Чат", command=show_chat_section)
 group_chat_button = tk.Button(nav_frame, text="Групповые чаты", command=show_group_chats)
 video_call_menu = tk.Button(nav_frame, text="Видеозвонок", command=lambda: start_video_call(global_receiver_id))
 
-study_button.pack(side=tk.LEFT, padx=5, pady=5)
-schedule_button.pack(side=tk.LEFT, padx=5, pady=5)
+
 useful_info_button.pack(side=tk.LEFT, padx=5, pady=5)
 chat_button.pack(side=tk.LEFT, padx=5, pady=5)
 group_chat_button.pack(side=tk.LEFT, padx=5, pady=5)
@@ -985,12 +886,10 @@ messages_list = tk.Listbox(content_frame, width=70, height=15)
 
 current_user_id = None
 current_username = None
-
+global_receiver_id = None
 selected_file_path = None
-selected_image_path = None
 
 selected_chat_file_path = None
-selected_chat_image_path = None
 
 login_button = tk.Button(root, text="Вход", command=login)
 register_button = tk.Button(root, text="Регистрация", command=register)
